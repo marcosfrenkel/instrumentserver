@@ -3,9 +3,11 @@ import argparse
 import logging
 import importlib.util
 import signal
+from pathlib import Path
 
 from . import QtWidgets, QtCore
 from .log import setupLogging
+from .config import loadConfig
 from .server.application import startServerGuiApplication
 from .server.core import startServer
 from bokeh.server.server import Server as BokehServer
@@ -15,7 +17,7 @@ from typing import Dict
 
 
 from .client import Client
-from .gui import widgetDialog
+from .gui import widgetDialog, widgetMainWindow
 from .gui.instruments import ParameterManagerGui
 
 setupLogging(addStreamHandler=True,
@@ -50,6 +52,7 @@ def serverScript() -> None:
                         help="On which network addresses we listen.")
     parser.add_argument("-i", "--init_script", default='',
                         type=str)
+    parser.add_argument("-c", "--config", type=str, default='')
     parser.add_argument("-r", "--read_only", default='False',
                         type=str)
     args = parser.parse_args()
@@ -58,17 +61,35 @@ def serverScript() -> None:
     else:
         read_only = False
 
+    # Load and process the config file if any.
+    configPath = args.config
+
+    stationConfig, serverConfig, guiConfig, tempFile = None, None, None, None
+    if configPath != '':
+        # Separates the corresponding settings into the 4 necessary parts
+        stationConfig, serverConfig, guiConfig, tempFile = loadConfig(configPath)
+
     if args.gui == 'False':
         server(port=args.port,
                allowUserShutdown=args.allow_user_shutdown,
                addresses=args.listen_at,
                initScript=args.init_script,
+               serverConfig=serverConfig,
+               stationConfig=stationConfig,
                readOnly=read_only)
     else:
         serverWithGui(port=args.port,
                       addresses=args.listen_at,
                       initScript=args.init_script,
+                      serverConfig=serverConfig,
+                      stationConfig=stationConfig,
+                      guiConfig=guiConfig,
                       readOnly=read_only)
+
+    # Close and delete the temporary files
+    if tempFile is not None:
+        tempFile.close()
+        Path(stationConfig).unlink(missing_ok=True)
 
 
 def parameterManagerScript() -> None:
@@ -85,12 +106,12 @@ def parameterManagerScript() -> None:
     if args.name in cli.list_instruments():
         pm = cli.get_instrument(args.name)
     else:
-        pm = cli.create_instrument(
-            'instrumentserver.params.ParameterManager', args.name)
+        pm = cli.find_or_create_instrument(
+            args.name, 'instrumentserver.params.ParameterManager')
         pm.fromFile()
         pm.update()
 
-    _ = widgetDialog(ParameterManagerGui(pm))
+    _ = widgetMainWindow(ParameterManagerGui(pm), 'Parameter Manager')
     app.exec_()
 
 
@@ -135,6 +156,7 @@ def loggerAndDashboard() -> None:
 
     # create the separate thread
     thread = QtCore.QThread()
+
     # create the logger
     parameter_logger = ParameterLogger(foo.config)
 
@@ -144,6 +166,7 @@ def loggerAndDashboard() -> None:
     # start the thread
     thread.started.connect(parameter_logger.runLogger)
     thread.start()
+
     bokehDashboard(foo.config)
 
     app.exec_()

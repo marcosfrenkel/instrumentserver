@@ -1,8 +1,9 @@
 import html
+import importlib
 import logging
 import os
 import time
-from typing import Union, Optional, Any
+from typing import Union, Optional, Any, Dict
 
 from instrumentserver.client import QtClient
 from instrumentserver.log import LogLevels, LogWidget, log
@@ -12,6 +13,8 @@ from .core import (
     InstrumentModuleBluePrint, ParameterBluePrint
 )
 from .. import QtCore, QtWidgets, QtGui
+from ..gui.misc import DetachableTabWidget
+from ..gui.instruments import GenericInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -126,36 +129,46 @@ class ServerGui(QtWidgets.QMainWindow):
     serverPortSet = QtCore.Signal(int)
 
     def __init__(self, startServer: Optional[bool] = True,
+                 guiConfig: Optional[dict] = None,
                  **serverKwargs: Any):
         super().__init__()
 
         self._paramValuesFile = os.path.abspath(os.path.join('.', 'parameters.json'))
         self._bluePrints = {}
         self._serverKwargs = serverKwargs
+        if guiConfig is None:
+            self._guiConfig = {}
+        else:
+            self._guiConfig = guiConfig
 
         self.stationServer = None
         self.stationServerThread = None
 
+        self.instrumentTabsOpen = {}
+
         self.setWindowTitle('Instrument server')
 
         # Central widget is simply a tab container.
-        self.tabs = QtWidgets.QTabWidget(self)
+        self.tabs = DetachableTabWidget(self)
+        self.tabs.onTabClosed.connect(self.onTabDeleted)
+
         self.setCentralWidget(self.tabs)
 
         self.stationList = StationList()
         self.stationObjInfo = StationObjectInfo()
         self.stationList.componentSelected.connect(self.displayComponentInfo)
+        self.stationList.itemDoubleClicked.connect(self.addInstrumentTab)
 
         stationWidgets = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         stationWidgets.addWidget(self.stationList)
         stationWidgets.addWidget(self.stationObjInfo)
         stationWidgets.setSizes([300, 500])
-        self.tabs.addTab(stationWidgets, 'Station')
 
-        self.tabs.addTab(LogWidget(level=logging.INFO), 'Log')
+        self.tabs.addUnclosableTab(stationWidgets, 'Station')
+        self.tabs.addUnclosableTab(LogWidget(level=logging.INFO), 'Log')
 
         self.serverStatus = ServerStatus()
-        self.tabs.addTab(self.serverStatus, 'Server')
+        self.tabs.addUnclosableTab(self.serverStatus, 'Server')
 
         # Toolbar.
         self.toolBar = self.addToolBar('Tools')
@@ -163,27 +176,27 @@ class ServerGui(QtWidgets.QMainWindow):
 
         # Station tools.
         self.toolBar.addWidget(QtWidgets.QLabel('Station:'))
-        refreshStationAction = QtWidgets.QAction(
+        self.refreshStationAction = QtWidgets.QAction(
             QtGui.QIcon(":/icons/refresh.svg"), 'Refresh', self)
-        refreshStationAction.triggered.connect(self.refreshStationComponents)
-        self.toolBar.addAction(refreshStationAction)
+        self.refreshStationAction.triggered.connect(self.refreshStationComponents)
+        self.toolBar.addAction(self.refreshStationAction)
 
         # Parameter tools.
         self.toolBar.addSeparator()
         self.toolBar.addWidget(QtWidgets.QLabel('Params:'))
 
-        loadParamsAction = QtWidgets.QAction(
+        self.loadParamsAction = QtWidgets.QAction(
             QtGui.QIcon(":/icons/load.svg"), 'Load from file', self)
-        loadParamsAction.triggered.connect(self.loadParamsFromFile)
-        self.toolBar.addAction(loadParamsAction)
+        self.loadParamsAction.triggered.connect(self.loadParamsFromFile)
+        self.toolBar.addAction(self.loadParamsAction)
 
-        saveParamsAction = QtWidgets.QAction(
+        self.saveParamsAction = QtWidgets.QAction(
             QtGui.QIcon(":/icons/save.svg"), 'Save to file', self)
-        saveParamsAction.triggered.connect(self.saveParamsToFile)
-        self.toolBar.addAction(saveParamsAction)
+        self.saveParamsAction.triggered.connect(self.saveParamsToFile)
+        self.toolBar.addAction(self.saveParamsAction)
 
         # A test client, just a simple helper object.
-        self.client = EmbeddedClient()
+        self.client = EmbeddedClient(raise_exceptions=False)
         self.client.recv_timeout = 10_000
         self.serverStatus.testButton.clicked.connect(
             lambda x: self.client.ask("Ping server.")
@@ -192,6 +205,11 @@ class ServerGui(QtWidgets.QMainWindow):
             self.startServer()
 
         # self.refreshStationComponents()
+
+        # development options: they must always be commented out
+        # printSpaceAction = QtWidgets.QAction(QtGui.QIcon(":/icons/code.svg"), 'prints empty space', self)
+        # printSpaceAction.triggered.connect(lambda x: print("\n \n \n \n"))
+        # self.toolBar.addAction(printSpaceAction)
 
     def log(self, message, level=LogLevels.info):
         log(logger, message, level)
@@ -257,10 +275,10 @@ class ServerGui(QtWidgets.QMainWindow):
         """Clear and re-populate the widget holding the station components, using
         the objects that are currently registered in the station."""
         self.stationList.clear()
-        for k, v in self.client.list_instruments().items():
-            bp = self.client.getBluePrint(k)
+        for ins in self.client.list_instruments():
+            bp = self.client.getBluePrint(ins)
             self.stationList.addInstrument(bp)
-            self._bluePrints[k] = bp
+            self._bluePrints[ins] = bp
         self.stationList.resizeColumnToContents(0)
 
     def loadParamsFromFile(self):
@@ -293,11 +311,48 @@ class ServerGui(QtWidgets.QMainWindow):
             bp = None
         self.stationObjInfo.setObject(bp)
 
+    @QtCore.Slot(QtWidgets.QTreeWidgetItem, int)
+    def addInstrumentTab(self, item: QtWidgets.QTreeWidgetItem, index: int):
+        """
+        Gets called when the user double clicks and item of the instrument list.
+         Adds a new generic instrument GUI window to the tab bar.
+         If the tab already exists switches to that one.
+        """
+        name = item.text(0)
+        if name not in self.instrumentTabsOpen:
+            ins = self.client.find_or_create_instrument(name)
+            widgetClass = GenericInstrument
+            kwargs = {}
+            # The user might create an instrument that is not in the config file
+            if name in self._guiConfig:
+                # import the widget
+                moduleName = '.'.join(self._guiConfig[name]['type'].split('.')[:-1])
+                widgetClassName = self._guiConfig[name]['type'].split('.')[-1]
+                module = importlib.import_module(moduleName)
+                widgetClass = getattr(module, widgetClassName)
 
-def startServerGuiApplication(**serverKwargs: Any) -> "ServerGui":
+                # get any kwargs if the config file has any
+                if 'kwargs' in self._guiConfig[name]:
+                    kwargs = self._guiConfig[name]['kwargs']
+
+            insWidget = widgetClass(ins, parent=self, **kwargs)
+            index = self.tabs.addTab(insWidget, ins.name)
+            self.instrumentTabsOpen[ins.name] = insWidget
+            self.tabs.setCurrentIndex(index)
+
+        elif name in self.instrumentTabsOpen:
+            self.tabs.setCurrentWidget(self.instrumentTabsOpen[name])
+
+    @QtCore.Slot(str)
+    def onTabDeleted(self, name: str) -> None:
+        if name in self.instrumentTabsOpen:
+            del self.instrumentTabsOpen[name]
+
+def startServerGuiApplication(guiConfig: Optional[Dict[str, Dict[str, Any]]] = None,
+                              **serverKwargs: Any) -> "ServerGui":
     """Create a server gui window.
     """
-    window = ServerGui(startServer=True, **serverKwargs)
+    window = ServerGui(startServer=True, guiConfig=guiConfig, **serverKwargs)
     window.show()
     return window
 
@@ -355,13 +410,15 @@ def parameterToHtml(bp: ParameterBluePrint, headerLevel=None):
     ret += f"""
 <ul>
     <li><b>Type:</b> {bp.parameter_class} ({bp.base_class})</li>
-    <li><b>Unit:</b> {bp.unit}</li>
-    <li><b>Validator:</b> {html.escape(str(bp.vals))}</li>
-    <li><b>Doc:</b> {html.escape(str(bp.docstring))}</li>
+    <li><b>Unit:</b> {bp.unit}</li>"""
+    # FIXME: We deleted the validator since there is no real easy way of deserializing them. It would be a good idea to
+    #  have them here though
+    # <li><b>Validator:</b> {html.escape(str(bp.vals))}</li>
+    var = """<li><b>Doc:</b> {html.escape(str(bp.docstring))}</li>
 </ul>
 </div>
     """
-    return ret
+    return ret + var
 
 
 def instrumentToHtml(bp: InstrumentModuleBluePrint):
@@ -391,7 +448,7 @@ def instrumentToHtml(bp: InstrumentModuleBluePrint):
     <div class="method_container">
     <div class='object_name'>{mbp.name}</div>
     <ul>
-        <li><b>Call signature:</b> {html.escape(str(mbp.call_signature))}</li>
+        <li><b>Call signature:</b> {html.escape(str(mbp.call_signature_str))}</li>
         <li><b>Doc:</b> {html.escape(str(mbp.docstring))}</li>
     </ul>
     </div>

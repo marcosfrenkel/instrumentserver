@@ -28,6 +28,8 @@ from instrumentserver.server.core import (
     ParameterSerializeSpec,
 )
 from .core import sendRequest, BaseClient
+from ..base import recvMultipart
+from ..blueprints import ParameterBroadcastBluePrint
 from ast import literal_eval
 
 logger = logging.getLogger(__name__)
@@ -140,7 +142,8 @@ class ProxyParameter(ProxyMixin, Parameter):
         else:
             kwargs['get_cmd'] = False
         kwargs['unit'] = bp.unit
-        kwargs['vals'] = bp.vals
+        # FIXME: uncomment after implementing serializable validators
+        # kwargs['vals'] = bp.vals
         kwargs['docstring'] = bp.docstring
         return kwargs
 
@@ -261,30 +264,31 @@ class ProxyInstrumentModule(ProxyMixin, InstrumentBase):
             )
             return self.askServer(msg)
 
-        sig = bp.call_signature
+        sig = bp.call_signature_str
+        params = bp.signature_parameters
         args = []
-        for pn in sig.parameters:
-            if sig.parameters[pn].kind in [inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                           inspect.Parameter.POSITIONAL_ONLY]:
+        # FIXME: a better solution to this would probably be to convet kind into the enum object. But it seems that the
+        #  parameter kind enum is private.
+        for pn, kind in params.items():
+            if kind in [str(inspect.Parameter.POSITIONAL_OR_KEYWORD), str(inspect.Parameter.POSITIONAL_ONLY)]:
                 args.append(f'{pn}')
-            elif sig.parameters[pn].kind is inspect.Parameter.VAR_POSITIONAL:
+            elif kind == str(inspect.Parameter.VAR_POSITIONAL):
                 args.append(f"*{pn}")
-            elif sig.parameters[pn].kind is inspect.Parameter.KEYWORD_ONLY:
+            elif kind == str(inspect.Parameter.KEYWORD_ONLY):
                 args.append(f"{pn}={pn}")
-            elif sig.parameters[pn].kind is inspect.Parameter.VAR_KEYWORD:
+            elif kind == str(inspect.Parameter.VAR_KEYWORD):
                 args.append(f"**{pn}")
 
         # we need to add a `self` argument because we want this to be a bound
         # method of the instrument instance.
-        sig_str = str(sig)
-        sig_str = sig_str[0] + 'self, ' + sig_str[1:]
-        new_func_str = f"""from typing import *\ndef {bp.name}{sig_str}:
+        sig = sig[0] + 'self, ' + sig[1:]
+        new_func_str = f"""from typing import *\ndef {bp.name}{sig}:
         return wrap({', '.join(args)})"""
 
         # make sure the method knows the wrap function.
         # TODO: this is not complete!
         globs = {'wrap': wrap, 'qcodes': qc}
-        exec(new_func_str, globs)
+        _ret = exec(new_func_str, globs)
         fun = globs[bp.name]
         fun.__doc__ = bp.docstring
         return globs[bp.name]
@@ -353,19 +357,25 @@ class Client(BaseClient):
         msg = ServerInstruction(operation=Operation.get_existing_instruments)
         return self.ask(msg)
 
-    def create_instrument(self, instrument_class: str, name: str,
-                          *args: Any, **kwargs: Any) -> ProxyInstrumentModule:
-        """ Create a new instrument on the server and return a proxy for the new
-        instrument.
+    def find_or_create_instrument(self, name: str, instrument_class: Optional[str] = None,
+                                  *args: Any, **kwargs: Any) -> ProxyInstrumentModule:
+        """ Looks for an instrument in the server. If it cannot find it, create a new instrument on the server. Returns
+        a proxy for either the found or the new instrument.
 
+        :param name: Name of the new instrument.
         :param instrument_class: Class of the instrument to create or a string of
             of the class.
-        :param name: Name of the new instrument.
         :param args: Positional arguments for new instrument instantiation.
         :param kwargs: Keyword arguments for new instrument instantiation.
 
         :returns: A new virtual instrument.
         """
+        if name in self.list_instruments():
+            return ProxyInstrumentModule(name=name, cli=self, remotePath=name)
+
+        if instrument_class is None:
+            raise ValueError('Need a class to create a new instrument.')
+
         req = ServerInstruction(
             operation=Operation.create_instrument,
             create_instrument_spec=InstrumentCreationSpec(
@@ -456,13 +466,13 @@ class SubClient(QtCore.QObject):
     """
     Specific subscription client used for real-time parameter updates.
     """
-    #: Signal(str) --
+    #: Signal(ParameterBroadcastBluePrint) --
     #: emitted when the server broadcast either a new parameter or an update to an existing one.
-    update = QtCore.Signal(str)
+    update = QtCore.Signal(ParameterBroadcastBluePrint)
 
     update_logger = QtCore.Signal(dict)
 
-    def __init__(self, instruments: List[str] = None, sub_host: str = 'localhost', sub_port: int = DEFAULT_PORT+1, logger_mode = False):
+    def __init__(self, instruments: List[str] = None, sub_host: str = 'localhost', sub_port: int = DEFAULT_PORT + 1, logger_mode = False):
         """
         Creates a new subscription client.
 
@@ -482,7 +492,6 @@ class SubClient(QtCore.QObject):
         self.logger_mode = logger_mode
 
         self.connected = False
-
 
     def connect(self):
         """
@@ -506,16 +515,14 @@ class SubClient(QtCore.QObject):
         self.connected = True
 
         while self.connected:
-
-            message = socket.recv_multipart()
-            # emits the signals already decoded so python recognizes it a string instead of bytes
+            message = recvMultipart(socket)
             if self.logger_mode:
                 _message = literal_eval(message[1].decode("utf-8"))
                 _message['server'] = self.host
                 _message['port'] = self.port
                 self.update_logger.emit(_message)
             else:
-                self.update.emit(message[1].decode("utf-8"))
+                self.update.emit(message[1])
 
         self.disconnect()
 
@@ -528,5 +535,12 @@ class _QtAdapter(QtCore.QObject):
 
 
 class QtClient(_QtAdapter, Client):
-    def __init__(self, parent=None, host='localhost', port=DEFAULT_PORT, connect=True):
-        super().__init__(parent, host, port, connect)
+    def __init__(self, parent=None,
+                 host='localhost',
+                 port=DEFAULT_PORT,
+                 connect=True,
+                 timeout=5000,
+                 raise_exceptions=True):
+        # Calling the parents like this ensures that the arguments arrive to the parents properly.
+        _QtAdapter.__init__(self, parent=parent)
+        Client.__init__(self, host, port, connect, timeout, raise_exceptions)

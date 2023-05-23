@@ -2,6 +2,7 @@ from typing import List
 
 from qcodes import Instrument
 from qcodes.utils import validators
+from qcodes.math_utils.field_vector import FieldVector
 import numpy as np
 import time
 
@@ -19,6 +20,14 @@ class DummyChannel(Instrument):
                            vals=validators.Numbers(-1, 1),
                            initial_value=1)
 
+        self.functions['dummy_function'] = self.dummy_function
+
+    def dummy_function(self, *args, **kwargs):
+        """Dummy function for specific channels used for testing"""
+        print(f'the dummy chanel: {self.name} has been activated with:')
+        print(f'args: {args}')
+        print(f'kwargs: {kwargs}')
+        return True
 
 class DummyInstrumentWithSubmodule(Instrument):
     """A dummy instrument with submodules."""
@@ -39,8 +48,28 @@ class DummyInstrumentWithSubmodule(Instrument):
             channel = DummyChannel('Chan{}'.format(chan_name))
             self.add_submodule(chan_name, channel)
 
+        self.functions['test_func'] = self.test_func
+        self.functions['dummy_function'] = self.dummy_function
+
     def test_func(self, a, b, *args, c: List[int] = [10, 11], **kwargs):
+        """
+        This is a test function, of course you knew this from the tittle but It's nice to have documentation, isn't it?
+
+        :param a: Very nice parameter.
+        :param b: Even nicer parameter
+        :param c: This one sucks though.
+        """
         return a, b, args[0], c, kwargs['d'], self.param0()
+
+    def dummy_function(self, *args, **kwargs):
+        """
+        Such a dumb dummy function here doing nothing other than printing and occupying your precious, precious terminal
+        space.
+        """
+        print(f'the dummy chanel: {self.name} has been activated with:')
+        print(f'args: {args}')
+        print(f'kwargs: {kwargs}')
+        return "I am being returned"
 
 
 class DummyInstrumentTimeout(Instrument):
@@ -56,7 +85,6 @@ class DummyInstrumentTimeout(Instrument):
     def get_random_timeout(self):
         time.sleep(10)
         return self.random
-
 
 
 class DummyInstrumentRandomNumber(Instrument):
@@ -106,3 +134,59 @@ class DummyInstrumentRandomNumber(Instrument):
     def get(self, param_name):
         self.generate_data(param_name)
         return self.parameters[param_name].get()
+
+
+class FieldVectorIns(Instrument):
+    """
+    class used to develop json serialization and guis
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.field_vector = FieldVector(x=1, y=1, z=1)
+        self.complex_value = 1 + 1j
+
+        self.complex_lst = [1 + 1j, -2 - 2j]
+
+        self.add_parameter(name="field",
+                           label='target field',
+                           unit='T',
+                           get_cmd=self.get_field,
+                           set_cmd=self.set_field,
+                           )
+
+        self.add_parameter(name='complex',
+                           label='complex value',
+                           unit='',
+                           get_cmd=self.get_complex,
+                           set_cmd=self.set_complex,
+                           )
+
+        self.add_parameter(name='complex_list',
+                           label='complex list',
+                           unit='',
+                           get_cmd=self.get_complex_list,
+                           set_cmd=self.set_complex_list,
+                           )
+
+    def get_field(self):
+        return self.field_vector
+
+    def set_field(self, field_vector: FieldVector):
+        self.field_vector = field_vector
+
+    def get_complex(self):
+        return self.complex_value
+
+    def set_complex(self, value: complex):
+        self.complex_value = value
+
+    def get_complex_list(self):
+        return self.complex_lst
+
+    def set_complex_list(self, value):
+        self.complex_lst = value
+
+    def generic_function(self):
+        print(f'this generic function has been called')
+        return 3

@@ -21,19 +21,20 @@ with Client() as cli:
 #%% create vna instrument in server
 Instrument.close_all()
 ins_cli = Client()
-dummy_vna = ins_cli.create_instrument(
+dummy_vna = ins_cli.find_or_create_instrument(
+    'dummy_vna',
     'instrumentserver.testing.dummy_instruments.rf.ResonatorResponse',
-    'dummy_vna'
+
 )
 
-dummy_multichan = ins_cli.create_instrument(
-    'instrumentserver.testing.dummy_instruments.generic.DummyInstrumentWithSubmodule',
+dummy_multichan = ins_cli.find_or_create_instrument(
     'dummy_multichan',
+    'instrumentserver.testing.dummy_instruments.generic.DummyInstrumentWithSubmodule',
 )
 
-pm = ins_cli.create_instrument(
-    'instrumentserver.params.ParameterManager',
+pm = ins_cli.find_or_create_instrument(
     'pm',
+    'instrumentserver.params.ParameterManager',
 )
 
 
