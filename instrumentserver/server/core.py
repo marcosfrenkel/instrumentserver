@@ -262,6 +262,8 @@ class StationServer(QtCore.QObject):
 
             self.messageReceived.emit(str(message), response_log)
 
+        self.station.close_all_registered_instruments()
+
         if self.pollingThread is not None and isinstance(self.pollingThread,QtCore.QThread):
             self.pollingThread.quit()
             logger.info("Polling thread finished")
