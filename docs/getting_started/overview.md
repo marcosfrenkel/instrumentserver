@@ -1,5 +1,11 @@
 # Instrumentserver Overview
 
+:::{admonition} 🗃️ Legacy page
+:class: caution
+This page predates the documentation refactor and has not been re-verified; parts of
+it may be out of date. It will be replaced by the new Getting Started pages.
+:::
+
 The aim of Instrumentserver is to facilitate [QCoDeS](https://qcodes.github.io/Qcodes/) access across a variety of process and devices.
 We communicate with the server through a TCP/IP connection allowing us to talk to it from any independent process or
 separate device in the same network.
@@ -7,11 +13,6 @@ separate device in the same network.
 Instrumentserver also includes a virtual instrument called Parameter Manager, whose job is to be a centralized and
 single source of truth for various parameters values with a user-friendly graphical interface to facilitate changing
 parameters.
-
-:::{warning}
-This guide is not up to date. Some new core features are not currently documented like configuration files and
-new features are in development. If you have questions on how to use these, please contact Marcos at: [marcosf2@illinois.edu]().
-:::
 
 ## Installation
 
